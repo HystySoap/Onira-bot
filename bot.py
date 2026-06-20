@@ -61,7 +61,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             response = await chat.send_message_async(text)
             await update.message.reply_text(response.text)
-    except Exception as e:
+        except Exception as e:
         logging.error(e)
         await update.message.reply_text("Что-то прервало нашу связь. Попробуй ещё раз через мгновение.")
 
