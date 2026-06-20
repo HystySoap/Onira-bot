@@ -68,7 +68,20 @@ def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
-    app.run_polling()
+# --- веб-фасад для Render ---
+web = Flask('')
+
+@web.route('/')
+def home():
+    return "ONIRA жива и дышит 🌙"
+
+def run_web():
+    web.run(host='0.0.0.0', port=8080)
+
+Thread(target=run_web).start()
+# --- конец веб-фасада ---
+
+app.run_polling()
 
 if __name__ == "__main__":
     main()
