@@ -51,7 +51,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in chats:
         model = genai.GenerativeModel(
-                "gemini-flash-latest",
+                "gemini-3.5-flash",
                 system_instruction=SYSTEM_PROMPT
             )
             chats[user_id] = model.start_chat(history=[])
