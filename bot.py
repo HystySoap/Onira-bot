@@ -66,6 +66,8 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Что-то прервало нашу связь. Попробуй ещё раз через мгновение.")
 
 def main():
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
@@ -82,6 +84,5 @@ def run_web():
     web.run(host='0.0.0.0', port=8080)
 
 if __name__ == "__main__":
-    Thread(target=run_web).start()
-    main()
+    Thread(target=run_web, daemon=True).start()
     main()
