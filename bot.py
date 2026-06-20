@@ -51,16 +51,16 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if user_id not in chats:
         model = genai.GenerativeModel(
-            "gemini-1.5-flash",
-            system_instruction=SYSTEM_PROMPT
-        )
-        chats[user_id] = model.start_chat(history=[])
+                "gemini-flash-latest",
+                system_instruction=SYSTEM_PROMPT
+            )
+            chats[user_id] = model.start_chat(history=[])
 
-    chat = chats[user_id]
-    await update.message.chat.send_action("typing")
-    try:
-        response = chat.send_message(text)
-        await update.message.reply_text(response.text)
+        chat = chats[user_id]
+        await update.message.chat.send_action("typing")
+        try:
+            response = await chat.send_message_async(text)
+            await update.message.reply_text(response.text)
     except Exception as e:
         logging.error(e)
         await update.message.reply_text("Что-то прервало нашу связь. Попробуй ещё раз через мгновение.")
