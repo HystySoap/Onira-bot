@@ -54,7 +54,7 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "gemini-flash-latest",
                 system_instruction=SYSTEM_PROMPT
             )
-            chats[user_id] = model.start_chat(history=[])
+        chats[user_id] = model.start_chat(history=[])
 
         chat = chats[user_id]
         await update.message.chat.send_action("typing")
