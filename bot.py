@@ -20,15 +20,12 @@ genai.configure(api_key=GEMINI_KEY)
 def get_moon_info():
     now = datetime.datetime.utcnow()
 
-    # Фаза Луны: 0 — новолуние, 100 — полнолуние
     moon = ephem.Moon(now)
     illumination = moon.phase  # процент освещённости 0..100
 
-    # Определяем растёт Луна или убывает
     prev = ephem.Moon(now - datetime.timedelta(hours=12)).phase
     growing = illumination >= prev
 
-    # Название фазы
     if illumination < 2:
         phase_name = "Новолуние"
     elif illumination > 98:
@@ -42,11 +39,9 @@ def get_moon_info():
     else:
         phase_name = "Убывающая Луна (старая)"
 
-    # Лунные сутки (от последнего новолуния)
     last_new = ephem.previous_new_moon(now)
     lunar_day = int((now - last_new.datetime()).total_seconds() / 86400) + 1
 
-    # Знак зодиака, по которому идёт Луна
     moon.compute(now)
     constellation = ephem.constellation(moon)[1]
 
@@ -161,10 +156,12 @@ SYSTEM_PROMPT = """
 
 chats = {}
 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Здравствуй. Я — ONIRA.\n\nРасскажи мне свой сон, и мы вместе попробуем услышать, что говорит твоё подсознание."
     )
+
 
 async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -180,7 +177,6 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = chats[user_id]
     await update.message.chat.send_action("typing")
     try:
-        # Добавляем актуальные лунные данные к каждому сообщению
         message_with_moon = text + moon_context()
         response = await chat.send_message_async(message_with_moon)
         await update.message.reply_text(response.text)
@@ -188,16 +184,27 @@ async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.error(e)
         await update.message.reply_text("Что-то прервало нашу связь. Попробуй ещё раз через мгновение.")
 
+
+def main():
+    import asyncio
+    asyncio.set_event_loop(asyncio.new_event_loop())
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
+
 web = Flask(__name__)
+
 
 @web.route('/')
 def home():
     return "ONIRA жива и дышит 🌙"
 
+
 def run_web():
     web.run(host='0.0.0.0', port=8080)
+
 
 if __name__ == "__main__":
     Thread(target=run_web, daemon=True).start()
