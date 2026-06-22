@@ -531,6 +531,13 @@ def main():
     init_db()
     keep_alive()
 
+    # 🌙 лечим event loop для Python 3.12+ / Render
+    import asyncio
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
@@ -539,6 +546,10 @@ def main():
 
     logging.info("🌙 ONIRA пробудилась.")
     app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
 
 
 if __name__ == "__main__":
