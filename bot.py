@@ -29,9 +29,13 @@ genai.configure(api_key=GEMINI_KEY)
 DB_PATH = "onira.db"
 FREE_DREAMS = 3
 
+# 🌿 Группа «До и После» — участники получают подписку бесплатно
+# ВАЖНО: бот должен быть админом этой группы, иначе проверка не сработает
+GROUP_CHAT_ID = -1003528588311
+
 
 # ============================================================
-# 🌑 ТАРИФЫ (пока без оплаты — для витрины и скриншотов)
+# 🌑 ТАРИФЫ
 # ============================================================
 TARIFFS = {
     "moon": {
@@ -73,11 +77,22 @@ def init_db():
             subscription_until TEXT,
             tariff            TEXT,
             free_left         INTEGER DEFAULT 3,
-            dreams_count      INTEGER DEFAULT 0
+            dreams_count      INTEGER DEFAULT 0,
+            free_month        TEXT
         )
     """)
+    # 🌙 на случай старой базы — добавляем колонку, если её нет
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN free_month TEXT")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
+
+
+def current_month():
+    now = datetime.datetime.utcnow()
+    return f"{now.year}-{now.month:02d}"
 
 
 def get_user(user_id):
@@ -86,8 +101,9 @@ def get_user(user_id):
     if row is None:
         now = datetime.datetime.utcnow().isoformat()
         conn.execute(
-            "INSERT INTO users (user_id, first_seen, free_left, dreams_count) VALUES (?, ?, ?, 0)",
-            (user_id, now, FREE_DREAMS),
+            "INSERT INTO users (user_id, first_seen, free_left, dreams_count, free_month) "
+            "VALUES (?, ?, ?, 0, ?)",
+            (user_id, now, FREE_DREAMS, current_month()),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -119,6 +135,30 @@ def has_active_subscription(user_id):
     u = get_user(user_id)
     until = parse_dt(u.get("subscription_until"))
     return until is not None and until > datetime.datetime.utcnow()
+
+
+# ============================================================
+# 🌙 ЕЖЕМЕСЯЧНОЕ ОБНОВЛЕНИЕ БЕСПЛАТНЫХ
+# ============================================================
+def refresh_free_if_new_month(user_id):
+    u = get_user(user_id)
+    month_now = current_month()
+    if u.get("free_month") != month_now:
+        update_user(user_id, free_left=FREE_DREAMS, free_month=month_now)
+        return get_user(user_id)
+    return u
+
+
+# ============================================================
+# 🌿 ПРОВЕРКА ЧЛЕНСТВА В ГРУППЕ «ДО И ПОСЛЕ»
+# ============================================================
+async def is_group_member(user_id, context):
+    try:
+        member = await context.bot.get_chat_member(GROUP_CHAT_ID, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception as e:
+        logging.error(f"Не удалось проверить членство в группе: {e}")
+        return False
 
 
 # ============================================================
@@ -165,7 +205,9 @@ def moon_context():
     except Exception as e:
         logging.error(f"Лунные часы дали сбой: {e}")
         return ""
-        # ============================================================
+
+
+# ============================================================
 # 🌙 SYSTEM PROMPT
 # ============================================================
 SYSTEM_PROMPT = """
@@ -291,7 +333,7 @@ WELCOME_TEXT = (
     "🔢 Нумеролог — числа судьбы\n"
     "🃏 Таролог — Арканы как зеркало души\n\n"
     "Я слышу дыхание Луны — её фазу, лунные сутки, знак — и вплетаю это в наш разговор.\n\n"
-    "🎁 Первые 3 толкования — мой подарок тебе.\n\n"
+    "🎁 Каждый месяц тебе доступны 3 толкования — мой подарок.\n\n"
     "🌑 Выбери внизу, с чего начать."
 )
 
@@ -321,7 +363,9 @@ HELP_TEXT = (
     "поделюсь природной практикой с учётом фазы Луны.\n\n"
     "👤 «Личный кабинет» — здесь видно, сколько снов рассказано "
     "и статус твоей подписки.\n\n"
-    "✨ «Подписка» — безлимитные толкования после бесплатных.\n\n"
+    "🎁 Каждый месяц — 3 бесплатных толкования.\n"
+    "💚 Участникам группы «До и После» — безлимит, пока вы в группе.\n\n"
+    "✨ «Подписка» — безлимитные толкования.\n\n"
     "🌕 Команды:\n"
     "/start — вернуться в начало\n"
     "/menu — открыть меню\n\n"
@@ -329,8 +373,8 @@ HELP_TEXT = (
 )
 
 
-def cabinet_text(user_id):
-    u = get_user(user_id)
+def cabinet_text(user_id, is_member=False):
+    u = refresh_free_if_new_month(user_id)
     first = parse_dt(u.get("first_seen"))
     first_str = first.strftime("%d.%m.%Y") if first else "—"
     dreams = u.get("dreams_count", 0)
@@ -347,7 +391,10 @@ def cabinet_text(user_id):
 
     lines.append("")
 
-    if has_active_subscription(user_id):
+    if is_member:
+        lines.append("💚 Ты участник группы «До и После»")
+        lines.append("✨ Безлимитные толкования — пока ты в группе")
+    elif has_active_subscription(user_id):
         until_dt = parse_dt(u.get("subscription_until"))
         until = until_dt.strftime("%d.%m.%Y")
         days_left = (until_dt - datetime.datetime.utcnow()).days
@@ -360,27 +407,32 @@ def cabinet_text(user_id):
         free_left = u.get("free_left", 0)
         lines.append("🌑 Подписка пока не активна")
         if free_left > 0:
-            lines.append(f"🎁 Бесплатных толкований осталось: {free_left}")
+            lines.append(f"🎁 Бесплатных толкований в этом месяце: {free_left}")
             lines.append("")
-            lines.append("Когда они закончатся — открой «✨ Подписка».")
+            lines.append("Каждый новый месяц снова появляются 3 толкования.")
         else:
-            lines.append("🌙 Бесплатные толкования закончились.")
+            lines.append("🌙 Бесплатные толкования в этом месяце закончились.")
             lines.append("")
-            lines.append("Чтобы вернуться к снам — открой «✨ Подписка».")
+            lines.append("Они вернутся в начале следующего месяца.")
+            lines.append("А для безлимита — открой «✨ Подписка».")
 
     return "\n".join(lines)
 
 
 def tariffs_text():
     lines = ["✨ ВЫБЕРИ СВОЙ ПУТЬ\n",
-             "Подписка — это безлимитные толкования снов на весь срок.\n"]
+             "Подписка — это безлимитные толкования снов на весь срок.\n",
+             "🎁 Без подписки — 3 бесплатных толкования каждый месяц.\n",
+             "💚 Участникам группы «До и После» — безлимит бесплатно.\n"]
     for t in TARIFFS.values():
         lines.append(f"{t['title']} — {t['price']}₽")
         lines.append(t["desc"])
         lines.append("")
     lines.append("🌙 Скоро здесь появится оплата. Совсем близко.")
     return "\n".join(lines)
-    # ============================================================
+
+
+# ============================================================
 # 🌙 ОБРАБОТЧИКИ КОМАНД
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -396,11 +448,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🌑 ОБРАБОТЧИК ТЕКСТА (кнопки + сны)
 # ============================================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 🌑 Игнорируем сообщения из групп — бот работает только в личке
+    if update.effective_chat.type != "private":
+        return
+
     user_id = update.effective_user.id
     text = update.message.text.strip()
     get_user(user_id)
-
-    logging.info(f"CHAT ID: {update.effective_chat.id}")   # 🌑 временная строка
 
     # --- Кнопки меню ---
     if text == "🌙 Рассказать сон":
@@ -412,7 +466,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if text == "👤 Личный кабинет":
-        await update.message.reply_text(cabinet_text(user_id), reply_markup=main_menu_keyboard())
+        is_member = await is_group_member(user_id, context)
+        await update.message.reply_text(
+            cabinet_text(user_id, is_member=is_member),
+            reply_markup=main_menu_keyboard(),
+        )
         return
 
     if text == "🌑 О ONIRA":
@@ -427,16 +485,26 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(HELP_TEXT, reply_markup=main_menu_keyboard())
         return
 
-    # --- Проверка доступа: подписка или бесплатные ---
-    u = get_user(user_id)
-    if not has_active_subscription(user_id):
-        if u.get("free_left", 0) <= 0:
-            await update.message.reply_text(
-                "🌙 Твои бесплатные толкования закончились.\n\n"
-                "Чтобы продолжить наши встречи во снах — открой «✨ Подписка».",
-                reply_markup=main_menu_keyboard(),
-            )
-            return
+    # --- ОБНОВЛЯЕМ БЕСПЛАТНЫЕ, ЕСЛИ НАСТУПИЛ НОВЫЙ МЕСЯЦ ---
+    u = refresh_free_if_new_month(user_id)
+
+        # --- ПРОВЕРЯЕМ ЧЛЕНСТВО В ГРУППЕ «ДО И ПОСЛЕ» ---
+    is_member = await is_group_member(user_id, context)
+
+    # --- ПРОВЕРКА ДОСТУПА ---
+    # Доступ открыт, если: участник группы ИЛИ активная подписка ИЛИ остались бесплатные
+    access_granted = is_member or has_active_subscription(user_id) or u.get("free_left", 0) > 0
+
+    if not access_granted:
+        await update.message.reply_text(
+            "🌙 Бесплатные толкования в этом месяце закончились.\n\n"
+            "Они вернутся в начале следующего месяца.\n\n"
+            "💚 А если ты в группе «До и После» — толкования для тебя безлимитны. "
+            "Проверь, что ты состоишь в группе.\n\n"
+            "✨ Либо открой «✨ Подписка» для безлимита.",
+            reply_markup=main_menu_keyboard(),
+        )
+        return
 
     # --- Толкование сна через Gemini ---
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -460,11 +528,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # --- Списываем бесплатное и считаем сны ---
+    # --- Считаем сны. Списываем бесплатное ТОЛЬКО если нет подписки и не участник группы ---
     dreams = u.get("dreams_count", 0) + 1
     fields = {"dreams_count": dreams}
-    if not has_active_subscription(user_id):
+
+    if not is_member and not has_active_subscription(user_id):
         fields["free_left"] = max(0, u.get("free_left", 0) - 1)
+
     update_user(user_id, **fields)
 
     await update.message.reply_text(answer, reply_markup=main_menu_keyboard())
@@ -533,7 +603,6 @@ def main():
     init_db()
     keep_alive()
 
-    # 🌙 лечим event loop для Python 3.12+ / Render
     import asyncio
     try:
         asyncio.get_event_loop()
@@ -548,10 +617,6 @@ def main():
 
     logging.info("🌙 ONIRA пробудилась.")
     app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
 
 
 if __name__ == "__main__":
