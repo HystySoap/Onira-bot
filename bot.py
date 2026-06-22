@@ -400,6 +400,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     get_user(user_id)
 
+    logging.info(f"CHAT ID: {update.effective_chat.id}")   # 🌑 временная строка
+
     # --- Кнопки меню ---
     if text == "🌙 Рассказать сон":
         await update.message.reply_text(
