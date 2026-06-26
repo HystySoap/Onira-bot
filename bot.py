@@ -486,7 +486,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(tariffs_text(), reply_markup=tariffs_keyboard())
         return
 
-        if text == "❓ Помощь":
+    if text == "❓ Помощь":
         await update.message.reply_text(HELP_TEXT, reply_markup=main_menu_keyboard())
         return
 
