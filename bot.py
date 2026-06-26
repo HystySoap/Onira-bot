@@ -10,11 +10,13 @@ import google.generativeai as genai
 
 from telegram import (
     Update, ReplyKeyboardMarkup,
-    InlineKeyboardButton, InlineKeyboardMarkup
+    InlineKeyboardButton, InlineKeyboardMarkup,
+    LabeledPrice
 )
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, filters, ContextTypes
+    CallbackQueryHandler, PreCheckoutQueryHandler,
+    filters, ContextTypes
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -25,6 +27,12 @@ logging.basicConfig(level=logging.INFO)
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_KEY = os.environ["GEMINI_KEY"]
 genai.configure(api_key=GEMINI_KEY)
+
+# 🌙 ПЛАТЁЖНЫЙ ТОКЕН ЮKASSA
+# Его выдаёт @BotFather: /mybots → твой бот → Payments → ЮKassa
+# (там уже зашиты твой shopId и секретный ключ — отдельно вписывать не нужно)
+# Впиши токен между кавычек ниже:
+PROVIDER_TOKEN = "390540012:LIVE:98540"   # <<< СЮДА ВПИШИ ПРОВАЙДЕР-ТОКЕН ЮKASSA
 
 DB_PATH = "onira.db"
 FREE_DREAMS = 3
@@ -81,7 +89,6 @@ def init_db():
             free_month        TEXT
         )
     """)
-    # 🌙 на случай старой базы — добавляем колонку, если её нет
     try:
         conn.execute("ALTER TABLE users ADD COLUMN free_month TEXT")
     except Exception:
@@ -428,7 +435,7 @@ def tariffs_text():
         lines.append(f"{t['title']} — {t['price']}₽")
         lines.append(t["desc"])
         lines.append("")
-    lines.append("🌙 Скоро здесь появится оплата. Совсем близко.")
+    lines.append("🌙 Выбери путь ниже — оплата проходит прямо здесь, в Telegram.")
     return "\n".join(lines)
 
 
@@ -448,7 +455,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # 🌑 ОБРАБОТЧИК ТЕКСТА (кнопки + сны)
 # ============================================================
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # 🌑 Игнорируем сообщения из групп — бот работает только в личке
     if update.effective_chat.type != "private":
         return
 
@@ -456,7 +462,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     get_user(user_id)
 
-    # --- Кнопки меню ---
     if text == "🌙 Рассказать сон":
         await update.message.reply_text(
             "🌑 Я слушаю.\n\nРасскажи свой сон — так, как помнишь. "
@@ -481,18 +486,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(tariffs_text(), reply_markup=tariffs_keyboard())
         return
 
-    if text == "❓ Помощь":
+        if text == "❓ Помощь":
         await update.message.reply_text(HELP_TEXT, reply_markup=main_menu_keyboard())
         return
 
     # --- ОБНОВЛЯЕМ БЕСПЛАТНЫЕ, ЕСЛИ НАСТУПИЛ НОВЫЙ МЕСЯЦ ---
     u = refresh_free_if_new_month(user_id)
 
-        # --- ПРОВЕРЯЕМ ЧЛЕНСТВО В ГРУППЕ «ДО И ПОСЛЕ» ---
+    # --- ПРОВЕРЯЕМ ЧЛЕНСТВО В ГРУППЕ «ДО И ПОСЛЕ» ---
     is_member = await is_group_member(user_id, context)
 
     # --- ПРОВЕРКА ДОСТУПА ---
-    # Доступ открыт, если: участник группы ИЛИ активная подписка ИЛИ остались бесплатные
     access_granted = is_member or has_active_subscription(user_id) or u.get("free_left", 0) > 0
 
     if not access_granted:
@@ -563,18 +567,79 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 💳 НАЖАЛИ НА ПОКУПКУ ТАРИФА — ОТПРАВЛЯЕМ СЧЁТ ЮKASSA
     if data.startswith("buy:"):
         key = data.split(":")[1]
         t = TARIFFS.get(key)
-        if t:
+        if not t:
+            await query.message.reply_text("🌑 Этот путь сейчас недоступен.")
+            return
+
+        if not PROVIDER_TOKEN:
             await query.message.reply_text(
-                f"🌙 Ты выбрала путь: {t['title']}\n\n"
-                f"{t['desc']}\n\n"
-                f"💫 Стоимость: {t['price']}₽\n\n"
-                "🌑 Оплата скоро откроется. Совсем близко — Луна готовит дорогу.",
+                "🌑 Оплата ещё настраивается. Совсем скоро Луна откроет дорогу.",
                 reply_markup=main_menu_keyboard(),
             )
+            return
+
+        await context.bot.send_invoice(
+            chat_id=query.from_user.id,
+            title=t["title"],
+            description=t["desc"],
+            payload=f"sub:{key}",                 # 🌙 здесь зашит выбранный тариф
+            provider_token=PROVIDER_TOKEN,
+            currency="RUB",
+            prices=[LabeledPrice(t["title"], t["price"] * 100)],  # цена в копейках
+        )
         return
+
+
+# ============================================================
+# 💳 ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (pre-checkout)
+# ============================================================
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    if query.invoice_payload.startswith("sub:"):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="🌑 Что-то пошло не так с оплатой.")
+
+
+# ============================================================
+# 🌕 УСПЕШНАЯ ОПЛАТА — АКТИВИРУЕМ ПОДПИСКУ (АВТОВЫДАЧА)
+# ============================================================
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    payment = update.message.successful_payment
+    payload = payment.invoice_payload          # например "sub:moon"
+    user_id = update.effective_user.id
+
+    key = payload.split(":")[1]
+    t = TARIFFS.get(key)
+    if not t:
+        await update.message.reply_text(
+            "🌑 Оплата прошла, но тариф не распознан. Напиши, пожалуйста, в поддержку."
+        )
+        return
+
+    now = datetime.datetime.utcnow()
+    # если подписка ещё активна — продлеваем от её конца, иначе от сегодня
+    current_until = parse_dt(get_user(user_id).get("subscription_until"))
+    base = current_until if (current_until and current_until > now) else now
+    new_until = base + datetime.timedelta(days=t["days"])
+
+    update_user(
+        user_id,
+        subscription_until=new_until.isoformat(),
+        tariff=t["title"],
+    )
+
+    await update.message.reply_text(
+        f"🌕 Подписка активирована.\n\n"
+        f"✨ Тариф: {t['title']}\n"
+        f"📅 Действует до: {new_until.strftime('%d.%m.%Y')}\n\n"
+        f"🌙 Теперь толкования снов безлимитны. Расскажи мне свой сон.",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 # ============================================================
@@ -610,9 +675,15 @@ def main():
         asyncio.set_event_loop(asyncio.new_event_loop())
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("menu", menu))
     app.add_handler(CallbackQueryHandler(handle_callback))
+
+    # 💳 ОБРАБОТЧИКИ ОПЛАТЫ — ставим ДО общего текстового
+    app.add_handler(PreCheckoutQueryHandler(precheckout))
+    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
+
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     logging.info("🌙 ONIRA пробудилась.")
