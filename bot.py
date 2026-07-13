@@ -463,7 +463,7 @@ def cabinet_text(user_id, is_member=False):
         else:
             lines.append("🌙 Автопродление: отключено")
             lines.append("Доступ сохранится до конца срока и больше не продлится.")
-        else:
+    else:
         free_left = u.get("free_left", 0)
         lines.append("🌑 Подписка пока не активна")
         if free_left > 0:
