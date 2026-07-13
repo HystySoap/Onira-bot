@@ -655,7 +655,7 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "Отменить автопродление можно в любой момент в личном кабинете —\n"
         "доступ сохранится до конца срока. 🌙",
         reply_markup=main_menu_keyboard(),
-    
+    )        
 
 # ============================================================
 # 🌙 ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ
