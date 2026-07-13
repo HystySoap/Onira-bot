@@ -28,17 +28,14 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 GEMINI_KEY = os.environ["GEMINI_KEY"]
 genai.configure(api_key=GEMINI_KEY)
 
-# 🌙 ПЛАТЁЖНЫЙ ТОКЕН ЮKASSA
-# Его выдаёт @BotFather: /mybots → твой бот → Payments → ЮKassa
-# (там уже зашиты твой shopId и секретный ключ — отдельно вписывать не нужно)
-# Впиши токен между кавычек ниже:
-PROVIDER_TOKEN = "390540012:LIVE:98540"   # <<< СЮДА ВПИШИ ПРОВАЙДЕР-ТОКЕН ЮKASSA
+PROVIDER_TOKEN = "390540012:LIVE:98540"   # <<< ПРОВАЙДЕР-ТОКЕН ЮKASSA
 
 DB_PATH = "onira.db"
-FREE_DREAMS = 3
+FREE_DREAMS = 3                  # 🎁 бесплатных снов на старте
+REFERRAL_BONUS = 3               # 🎁 снов за каждого приглашённого друга
+SUPPORT_CONTACT = "@HystySoap"   # 🌿 поддержка
 
-# 🌿 Группа «До и После» — участники получают подписку бесплатно
-# ВАЖНО: бот должен быть админом этой группы, иначе проверка не сработает
+# 🌿 Группа «До и После» — участники получают безлимит бесплатно
 GROUP_CHAT_ID = -1003528588311
 
 
@@ -80,26 +77,29 @@ def init_db():
     conn = db()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
-            user_id           INTEGER PRIMARY KEY,
-            first_seen        TEXT,
+            user_id            INTEGER PRIMARY KEY,
+            first_seen         TEXT,
             subscription_until TEXT,
-            tariff            TEXT,
-            free_left         INTEGER DEFAULT 3,
-            dreams_count      INTEGER DEFAULT 0,
-            free_month        TEXT
+            tariff             TEXT,
+            free_left          INTEGER DEFAULT 3,
+            dreams_count       INTEGER DEFAULT 0,
+            invited_count      INTEGER DEFAULT 0,
+            referred_by        INTEGER,
+            autopay            INTEGER DEFAULT 0
         )
     """)
-    try:
-        conn.execute("ALTER TABLE users ADD COLUMN free_month TEXT")
-    except Exception:
-        pass
+    # На случай старой базы — добавляем недостающие колонки
+    for ddl in [
+        "ALTER TABLE users ADD COLUMN invited_count INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN referred_by INTEGER",
+        "ALTER TABLE users ADD COLUMN autopay INTEGER DEFAULT 0",
+    ]:
+        try:
+            conn.execute(ddl)
+        except Exception:
+            pass
     conn.commit()
     conn.close()
-
-
-def current_month():
-    now = datetime.datetime.utcnow()
-    return f"{now.year}-{now.month:02d}"
 
 
 def get_user(user_id):
@@ -108,14 +108,21 @@ def get_user(user_id):
     if row is None:
         now = datetime.datetime.utcnow().isoformat()
         conn.execute(
-            "INSERT INTO users (user_id, first_seen, free_left, dreams_count, free_month) "
-            "VALUES (?, ?, ?, 0, ?)",
-            (user_id, now, FREE_DREAMS, current_month()),
+            "INSERT INTO users (user_id, first_seen, free_left, dreams_count, invited_count) "
+            "VALUES (?, ?, ?, 0, 0)",
+            (user_id, now, FREE_DREAMS),
         )
         conn.commit()
         row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     conn.close()
     return dict(row)
+
+
+def user_exists(user_id):
+    conn = db()
+    row = conn.execute("SELECT 1 FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    conn.close()
+    return row is not None
 
 
 def update_user(user_id, **fields):
@@ -144,16 +151,36 @@ def has_active_subscription(user_id):
     return until is not None and until > datetime.datetime.utcnow()
 
 
+def is_autopay_on(user_id):
+    # 🌙 Для того, кто настраивает рекуррентные списания ЮKassa:
+    # перед каждым списанием проверять эту функцию.
+    # True — списывать и продлевать. False — НЕ списывать.
+    return get_user(user_id).get("autopay", 0) == 1
+
+
 # ============================================================
-# 🌙 ЕЖЕМЕСЯЧНОЕ ОБНОВЛЕНИЕ БЕСПЛАТНЫХ
+# 🎁 СИСТЕМА «ПРИВЕДИ ДРУГА»
 # ============================================================
-def refresh_free_if_new_month(user_id):
-    u = get_user(user_id)
-    month_now = current_month()
-    if u.get("free_month") != month_now:
-        update_user(user_id, free_left=FREE_DREAMS, free_month=month_now)
-        return get_user(user_id)
-    return u
+def process_referral(new_user_id, inviter_id):
+    """Начисляет бонус пригласившему. True — если начислен."""
+    if new_user_id == inviter_id:
+        return False
+    if not user_exists(inviter_id):
+        return False
+
+    new_user = get_user(new_user_id)
+    if new_user.get("referred_by"):
+        return False
+
+    update_user(new_user_id, referred_by=inviter_id)
+
+    inviter = get_user(inviter_id)
+    update_user(
+        inviter_id,
+        free_left=inviter.get("free_left", 0) + REFERRAL_BONUS,
+        invited_count=inviter.get("invited_count", 0) + 1,
+    )
+    return True
 
 
 # ============================================================
@@ -296,8 +323,9 @@ def main_menu_keyboard():
     return ReplyKeyboardMarkup(
         [
             ["🌙 Рассказать сон"],
-            ["👤 Личный кабинет", "🌑 О ONIRA"],
-            ["✨ Подписка", "❓ Помощь"],
+            ["👤 Личный кабинет", "🎁 Пригласить друга"],
+            ["🌑 О ONIRA", "✨ Подписка"],
+            ["❓ Помощь"],
         ],
         resize_keyboard=True,
     )
@@ -320,6 +348,20 @@ def about_keyboard():
     ])
 
 
+def cabinet_keyboard(user_id):
+    if has_active_subscription(user_id):
+        u = get_user(user_id)
+        if u.get("autopay", 0) == 1:
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton("🚫 Отменить подписку", callback_data="cancel_sub")]
+            ])
+        else:
+            return InlineKeyboardMarkup([
+                [InlineKeyboardButton("✨ Возобновить автопродление", callback_data="resume_sub")]
+            ])
+    return None
+
+
 # ============================================================
 # 🌑 ТЕКСТЫ
 # ============================================================
@@ -340,7 +382,8 @@ WELCOME_TEXT = (
     "🔢 Нумеролог — числа судьбы\n"
     "🃏 Таролог — Арканы как зеркало души\n\n"
     "Я слышу дыхание Луны — её фазу, лунные сутки, знак — и вплетаю это в наш разговор.\n\n"
-    "🎁 Каждый месяц тебе доступны 3 толкования — мой подарок.\n\n"
+    "🎁 Тебе доступны 3 бесплатных толкования — мой подарок.\n"
+    "А приглашая друзей, ты получаешь ещё +3 толкования за каждого. 🌿\n\n"
     "🌑 Выбери внизу, с чего начать."
 )
 
@@ -368,27 +411,32 @@ HELP_TEXT = (
     "Отвечай так, как откликается.\n\n"
     "🌿 3. Затем я помогу увидеть скрытые смыслы сна и, если захочешь, "
     "поделюсь природной практикой с учётом фазы Луны.\n\n"
-    "👤 «Личный кабинет» — здесь видно, сколько снов рассказано "
-    "и статус твоей подписки.\n\n"
-    "🎁 Каждый месяц — 3 бесплатных толкования.\n"
+    "👤 «Личный кабинет» — сны, подписка, автопродление.\n\n"
+    "🎁 На старте — 3 бесплатных толкования.\n"
+    "🎁 «Пригласить друга» — за каждого друга +3 толкования.\n"
     "💚 Участникам группы «До и После» — безлимит, пока вы в группе.\n\n"
-    "✨ «Подписка» — безлимитные толкования.\n\n"
+    "✨ «Подписка» — безлимитные толкования.\n"
+    "🚫 Отменить автопродление можно в любой момент в личном кабинете — "
+    "доступ сохранится до конца оплаченного срока.\n\n"
     "🌕 Команды:\n"
     "/start — вернуться в начало\n"
     "/menu — открыть меню\n\n"
+    f"🌿 Поддержка: {SUPPORT_CONTACT}\n\n"
     "Просто начни — и Луна будет рядом."
 )
 
 
 def cabinet_text(user_id, is_member=False):
-    u = refresh_free_if_new_month(user_id)
+    u = get_user(user_id)
     first = parse_dt(u.get("first_seen"))
     first_str = first.strftime("%d.%m.%Y") if first else "—"
     dreams = u.get("dreams_count", 0)
+    invited = u.get("invited_count", 0)
 
     lines = ["👤 ЛИЧНЫЙ КАБИНЕТ\n"]
     lines.append(f"🌙 Со мной с: {first_str}")
     lines.append(f"🌑 Снов рассказано: {dreams}")
+    lines.append(f"🎁 Друзей приглашено: {invited}")
 
     try:
         phase, illum, lday, sign = get_moon_info()
@@ -410,70 +458,185 @@ def cabinet_text(user_id, is_member=False):
         lines.append(f"🌿 Тариф: {tariff}")
         lines.append(f"📅 Действует до: {until}")
         lines.append(f"⏳ Осталось дней: {days_left}")
+        if u.get("autopay", 0) == 1:
+            lines.append("🔄 Автопродление: включено")
+        else:
+            lines.append("🌙 Автопродление: отключено")
+            lines.append("Доступ сохранится до конца срока и больше не продлится.")
     else:
         free_left = u.get("free_left", 0)
         lines.append("🌑 Подписка пока не активна")
         if free_left > 0:
-            lines.append(f"🎁 Бесплатных толкований в этом месяце: {free_left}")
+            lines.append(f"🎁 Осталось бесплатных толкований: {free_left}")
             lines.append("")
-            lines.append("Каждый новый месяц снова появляются 3 толкования.")
+            lines.append("🌿 Пригласи друга — и получишь ещё +3 толкования.")
         else:
-            lines.append("🌙 Бесплатные толкования в этом месяце закончились.")
+            lines.append("🌙 Бесплатные толкования закончились.")
             lines.append("")
-            lines.append("Они вернутся в начале следующего месяца.")
-            lines.append("А для безлимита — открой «✨ Подписка».")
+                        lines.append("🎁 Пригласи друга — и получишь +3 толкования за каждого.")
+            lines.append("✨ А для безлимита — открой «✨ Подписка».")
 
     return "\n".join(lines)
 
 
 def tariffs_text():
-    lines = ["✨ ВЫБЕРИ СВОЙ ПУТЬ\n",
-             "Подписка — это безлимитные толкования снов на весь срок.\n",
-             "🎁 Без подписки — 3 бесплатных толкования каждый месяц.\n",
-             "💚 Участникам группы «До и После» — безлимит бесплатно.\n"]
+    lines = [
+        "✨ ВЫБЕРИ СВОЙ ПУТЬ\n",
+        "Подписка — это безлимитные толкования снов на весь срок.\n",
+        "🎁 Без подписки — 3 бесплатных толкования на старте",
+        "🎁 И +3 за каждого приглашённого друга\n",
+    ]
     for t in TARIFFS.values():
         lines.append(f"{t['title']} — {t['price']}₽")
         lines.append(t["desc"])
         lines.append("")
-    lines.append("🌙 Выбери путь ниже — оплата проходит прямо здесь, в Telegram.")
+    lines.append("🌿 Подписка продлевается автоматически.")
+    lines.append("🚫 Отменить автопродление можно в любой момент в личном кабинете —")
+    lines.append("доступ сохранится до конца оплаченного срока.")
+    lines.append("")
+    lines.append(f"Вопросы: {SUPPORT_CONTACT}")
+    lines.append("")
+    lines.append("🌑 Выбери свой путь под Луной:")
     return "\n".join(lines)
 
 
+def referral_text(user_id, bot_username):
+    u = get_user(user_id)
+    invited = u.get("invited_count", 0)
+    free_left = u.get("free_left", 0)
+    link = f"https://t.me/{bot_username}?start=ref{user_id}"
+    return (
+        "🎁 ПРИГЛАСИ ДРУГА\n\n"
+        "Поделись со мной тем, кто тоже видит сны.\n\n"
+        f"🌙 За каждого друга, который придёт по твоей ссылке,\n"
+        f"ты получишь +{REFERRAL_BONUS} бесплатных толкования.\n\n"
+        f"✨ Твоя личная ссылка:\n{link}\n\n"
+        f"🌿 Уже приглашено друзей: {invited}\n"
+        f"🎁 Доступно бесплатных толкований: {free_left}\n\n"
+        "Просто перешли ссылку — Луна сделает остальное. 🌕"
+    )
+
+
 # ============================================================
-# 🌙 ОБРАБОТЧИКИ КОМАНД
+# 🌙 ДОСТУП К ТОЛКОВАНИЯМ
+# ============================================================
+async def check_access(user_id, context):
+    """
+    Возвращает (можно_ли, причина):
+    ("member" / "sub" / "free" / None)
+    """
+    if await is_group_member(user_id, context):
+        return True, "member"
+    if has_active_subscription(user_id):
+        return True, "sub"
+    u = get_user(user_id)
+    if u.get("free_left", 0) > 0:
+        return True, "free"
+    return False, None
+
+
+def no_access_text(user_id, bot_username):
+    link = f"https://t.me/{bot_username}?start=ref{user_id}"
+    return (
+        "🌑 Твои бесплатные толкования закончились.\n\n"
+        "Но путь не обрывается — есть две тропы:\n\n"
+        f"🎁 Пригласи друга — за каждого получишь +{REFERRAL_BONUS} толкования.\n"
+        f"Твоя ссылка:\n{link}\n\n"
+        "✨ Или открой подписку — и толкуй сны без ограничений.\n\n"
+        "Выбери свой путь под Луной:"
+    )
+
+
+# ============================================================
+# 🌑 КОМАНДЫ
 # ============================================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    get_user(update.effective_user.id)
+    user_id = update.effective_user.id
+    is_new = not user_exists(user_id)
+    get_user(user_id)  # создаём при первом визите
+
+    # 🎁 Реферальная ссылка: /start ref123456
+    if is_new and context.args:
+        arg = context.args[0]
+        if arg.startswith("ref"):
+            try:
+                inviter_id = int(arg[3:])
+                if process_referral(user_id, inviter_id):
+                    try:
+                        await context.bot.send_message(
+                            inviter_id,
+                            "🎁 Твой друг пришёл по твоей ссылке!\n\n"
+                            f"🌙 Тебе начислено +{REFERRAL_BONUS} бесплатных толкования. ✨",
+                        )
+                    except Exception:
+                        pass
+            except (ValueError, IndexError):
+                pass
+
+    chats.pop(user_id, None)
     await update.message.reply_text(WELCOME_TEXT, reply_markup=main_menu_keyboard())
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🌙 Главное меню", reply_markup=main_menu_keyboard())
+    await update.message.reply_text(
+        "🌙 Ты в главном меню. Выбери путь:",
+        reply_markup=main_menu_keyboard(),
+    )
 
 
 # ============================================================
-# 🌑 ОБРАБОТЧИК ТЕКСТА (кнопки + сны)
+# 💳 ОПЛАТА
 # ============================================================
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type != "private":
-        return
+async def send_invoice(chat_id, tariff_key, context):
+    t = TARIFFS[tariff_key]
+    await context.bot.send_invoice(
+        chat_id=chat_id,
+        title=t["title"],
+        description=t["desc"],
+        payload=f"tariff:{tariff_key}",
+        provider_token=PROVIDER_TOKEN,
+        currency="RUB",
+        prices=[LabeledPrice(t["title"], t["price"] * 100)],
+        need_email=True,
+        send_email_to_provider=True,
+        provider_data={
+            "receipt": {
+                "items": [
+                    {
+                        "description": f"Подписка ONIRA: {t['title']}",
+                        "quantity": "1.00",
+                        "amount": {
+                            "value": f"{t['price']}.00",
+                            "currency": "RUB",
+                        },
+                        "vat_code": 1,
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service",
+                    }
+                ]
+            }
+        },
+    )
 
+
+async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.pre_checkout_query
+    if query.invoice_payload.startswith("tariff:"):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Что-то пошло не так. Попробуй ещё раз 🌑")
+
+
+async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    text = update.message.text.strip()
-    get_user(user_id)
+    payload = update.message.successful_payment.invoice_payload
+    tariff_key = payload.split(":", 1)[1]
+    t = TARIFFS[tariff_key]
 
-    if text == "🌙 Рассказать сон":
-        await update.message.reply_text(
-            "🌑 Я слушаю.\n\nРасскажи свой сон — так, как помнишь. "
-            "Не подбирай слова, просто опиши, что было.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    if text == "👤 Личный кабинет":
-        is_member = await is_group_member(user_id, context)
-        await update.message.reply_text(
-            cabinet_text(user_id, is_member=is_member),
+    u = get_user(user_id)
+    now = datetime.datetime.utcnow()
+    current_until = parse_dt(u.get("subscription_until"))
+    base = current_until if (current_until and current_until >, bot_username),
             reply_markup=main_menu_keyboard(),
         )
         return
@@ -490,204 +653,101 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(HELP_TEXT, reply_markup=main_menu_keyboard())
         return
 
-    # --- ОБНОВЛЯЕМ БЕСПЛАТНЫЕ, ЕСЛИ НАСТУПИЛ НОВЫЙ МЕСЯЦ ---
-    u = refresh_free_if_new_month(user_id)
-
-    # --- ПРОВЕРЯЕМ ЧЛЕНСТВО В ГРУППЕ «ДО И ПОСЛЕ» ---
-    is_member = await is_group_member(user_id, context)
-
-    # --- ПРОВЕРКА ДОСТУПА ---
-    access_granted = is_member or has_active_subscription(user_id) or u.get("free_left", 0) > 0
-
-    if not access_granted:
+    # ---------- ОБЫЧНОЕ СООБЩЕНИЕ = РАЗГОВОР С ONIRA ----------
+    allowed, reason = await check_access(user_id, context)
+    if not allowed:
+        bot_username = (await context.bot.get_me()).username
         await update.message.reply_text(
-            "🌙 Бесплатные толкования в этом месяце закончились.\n\n"
-            "Они вернутся в начале следующего месяца.\n\n"
-            "💚 А если ты в группе «До и После» — толкования для тебя безлимитны. "
-            "Проверь, что ты состоишь в группе.\n\n"
-            "✨ Либо открой «✨ Подписка» для безлимита.",
-            reply_markup=main_menu_keyboard(),
+            no_access_text(user_id, bot_username),
+            reply_markup=tariffs_keyboard(),
         )
         return
 
-    # --- Толкование сна через Gemini ---
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
-    if user_id not in chats:
-        model = genai.GenerativeModel(
-            "gemini-flash-latest",
-            system_instruction=SYSTEM_PROMPT,
-        )
-        chats[user_id] = model.start_chat(history=[])
+    await update.message.chat.send_action("typing")
 
     try:
-        prompt = text + moon_context()
-        response = chats[user_id].send_message(prompt)
-        answer = response.text
-    except Exception as e:
-        logging.error(f"Gemini сбой: {e}")
-        await update.message.reply_text(
-            "🌑 Луна на миг закрылась облаком. Попробуй рассказать сон ещё раз.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    # --- Считаем сны. Списываем бесплатное ТОЛЬКО если нет подписки и не участник группы ---
-    dreams = u.get("dreams_count", 0) + 1
-    fields = {"dreams_count": dreams}
-
-    if not is_member and not has_active_subscription(user_id):
-        fields["free_left"] = max(0, u.get("free_left", 0) - 1)
-
-    update_user(user_id, **fields)
-
-    await update.message.reply_text(answer, reply_markup=main_menu_keyboard())
-
-
-# ============================================================
-# 🌙 ОБРАБОТЧИК INLINE-КНОПОК
-# ============================================================
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    data = query.data
-
-    if data == "back_menu":
-        await query.message.reply_text("🌙 Главное меню", reply_markup=main_menu_keyboard())
-        return
-
-    if data == "open_tariffs":
-        await query.message.reply_text(tariffs_text(), reply_markup=tariffs_keyboard())
-        return
-
-    if data == "tell_dream":
-        await query.message.reply_text(
-            "🌑 Я слушаю.\n\nРасскажи свой сон — так, как помнишь.",
-            reply_markup=main_menu_keyboard(),
-        )
-        return
-
-    # 💳 НАЖАЛИ НА ПОКУПКУ ТАРИФА — ОТПРАВЛЯЕМ СЧЁТ ЮKASSA
-    if data.startswith("buy:"):
-        key = data.split(":")[1]
-        t = TARIFFS.get(key)
-        if not t:
-            await query.message.reply_text("🌑 Этот путь сейчас недоступен.")
-            return
-
-        if not PROVIDER_TOKEN:
-            await query.message.reply_text(
-                "🌑 Оплата ещё настраивается. Совсем скоро Луна откроет дорогу.",
-                reply_markup=main_menu_keyboard(),
+        if user_id not in chats:
+            model = genai.GenerativeModel(
+                model_name="gemini-2.0-flash",
+                system_instruction=SYSTEM_PROMPT,
             )
-            return
+            chats[user_id] = model.start_chat(history=[])
 
-        await context.bot.send_invoice(
-            chat_id=query.from_user.id,
-            title=t["title"],
-            description=t["desc"],
-            payload=f"sub:{key}",                 # 🌙 здесь зашит выбранный тариф
-            provider_token=PROVIDER_TOKEN,
-            currency="RUB",
-            prices=[LabeledPrice(t["title"], t["price"] * 100)],  # цена в копейках
-        )
-        return
+        response = chats[user_id].send_message(text + moon_context())
+        answer = response.text
 
+        # 🎁 Списываем бесплатный сон (только у тех, кто без подписки и не в группе)
+        if reason == "free":
+            u = get_user(user_id)
+            new_free = max(0, u.get("free_left", 0) - 1)
+            update_user(
+                user_id,
+                free_left=new_free,
+                dreams_count=u.get("dreams_count", 0) + 1,
+            )
+            if new_free == 1:
+                answer += "\n\n🌑 У тебя остался 1 бесплатный разговор со мной."
+            elif new_free == 0:
+                answer += (
+                    "\n\n🌑 Это был твой последний бесплатный разговор.\n"
+                    "🎁 Пригласи друга — получишь ещё +3 толкования.\n"
+                    "✨ Или открой подписку в меню — и границ не будет."
+                )
+        else:
+            u = get_user(user_id)
+            update_user(user_id, dreams_count=u.get("dreams_count", 0) + 1)
 
-# ============================================================
-# 💳 ПОДТВЕРЖДЕНИЕ ОПЛАТЫ (pre-checkout)
-# ============================================================
-async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.pre_checkout_query
-    if query.invoice_payload.startswith("sub:"):
-        await query.answer(ok=True)
-    else:
-        await query.answer(ok=False, error_message="🌑 Что-то пошло не так с оплатой.")
+        # Telegram не любит сообщения длиннее 4096 символов
+        for i in range(0, len(answer), 4000):
+            await update.message.reply_text(answer[i:i + 4000])
 
-
-# ============================================================
-# 🌕 УСПЕШНАЯ ОПЛАТА — АКТИВИРУЕМ ПОДПИСКУ (АВТОВЫДАЧА)
-# ============================================================
-async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    payment = update.message.successful_payment
-    payload = payment.invoice_payload          # например "sub:moon"
-    user_id = update.effective_user.id
-
-    key = payload.split(":")[1]
-    t = TARIFFS.get(key)
-    if not t:
+    except Exception as e:
+        logging.error(f"Gemini error: {e}")
+        chats.pop(user_id, None)
         await update.message.reply_text(
-            "🌑 Оплата прошла, но тариф не распознан. Напиши, пожалуйста, в поддержку."
+            "🌑 Туман сгустился, и я на миг потеряла нить...\n"
+            "Повтори, пожалуйста, ещё раз."
         )
-        return
-
-    now = datetime.datetime.utcnow()
-    # если подписка ещё активна — продлеваем от её конца, иначе от сегодня
-    current_until = parse_dt(get_user(user_id).get("subscription_until"))
-    base = current_until if (current_until and current_until > now) else now
-    new_until = base + datetime.timedelta(days=t["days"])
-
-    update_user(
-        user_id,
-        subscription_until=new_until.isoformat(),
-        tariff=t["title"],
-    )
-
-    await update.message.reply_text(
-        f"🌕 Подписка активирована.\n\n"
-        f"✨ Тариф: {t['title']}\n"
-        f"📅 Действует до: {new_until.strftime('%d.%m.%Y')}\n\n"
-        f"🌙 Теперь толкования снов безлимитны. Расскажи мне свой сон.",
-        reply_markup=main_menu_keyboard(),
-    )
 
 
 # ============================================================
-# 🌿 FLASK (чтобы хостинг не засыпал)
+# 🌐 FLASK (чтобы хостинг не засыпал)
 # ============================================================
-flask_app = Flask("")
+app = Flask(__name__)
 
 
-@flask_app.route("/")
+@app.route("/")
 def home():
-    return "🌙 ONIRA жива и слушает сны."
+    return "ONIRA is dreaming... 🌙"
 
 
 def run_flask():
-    flask_app.run(host="0.0.0.0", port=8080)
-
-
-def keep_alive():
-    Thread(target=run_flask).start()
+    app.run(host="0.0.0.0", port=8080)
 
 
 # ============================================================
-# 🌙 ЗАПУСК
+# 🌕 ЗАПУСК
 # ============================================================
 def main():
     init_db()
-    keep_alive()
 
-    import asyncio
-    try:
-        asyncio.get_event_loop()
-    except RuntimeError:
-        asyncio.set_event_loop(asyncio.new_event_loop())
+    Thread(target=run_flask, daemon=True).start()
 
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("menu", menu))
-    app.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(PreCheckoutQueryHandler(precheckout))
+    application.add_handler(
+        MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment)
+    )
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
+    )
 
-    # 💳 ОБРАБОТЧИКИ ОПЛАТЫ — ставим ДО общего текстового
-    app.add_handler(PreCheckoutQueryHandler(precheckout))
-    app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, successful_payment))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    logging.info("🌙 ONIRA пробудилась.")
-    app.run_polling()
+    logging.info("🌙 ONIRA пробудилась...")
+    application.run_polling()
 
 
 if __name__ == "__main__":
