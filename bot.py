@@ -463,17 +463,17 @@ def cabinet_text(user_id, is_member=False):
         else:
             lines.append("🌙 Автопродление: отключено")
             lines.append("Доступ сохранится до конца срока и больше не продлится.")
-    else:
+        else:
         free_left = u.get("free_left", 0)
         lines.append("🌑 Подписка пока не активна")
         if free_left > 0:
             lines.append(f"🎁 Осталось бесплатных толкований: {free_left}")
             lines.append("")
             lines.append("🌿 Пригласи друга — и получишь ещё +3 толкования.")
-    else:
+        else:
             lines.append("🌙 Бесплатные толкования закончились.")
             lines.append("")
-                        lines.append("🎁 Пригласи друга — и получишь +3 толкования за каждого.")
+            lines.append("🎁 Пригласи друга — и получишь +3 толкования за каждого.")
             lines.append("✨ А для безлимита — открой «✨ Подписка».")
 
     return "\n".join(lines)
