@@ -636,10 +636,33 @@ async def successful_payment(update: Update, context: ContextTypes.DEFAULT_TYPE)
     u = get_user(user_id)
     now = datetime.datetime.utcnow()
     current_until = parse_dt(u.get("subscription_until"))
-    base = current_until if (current_until and current_until >, bot_username),
-            reply_markup=main_menu_keyboard(),
-        )
-        return
+    base = current_until if (current_until and current_until > now) else now
+    new_until = base + datetime.timedelta(days=t["days"])
+
+    update_user(
+        user_id,
+        subscription_until=new_until.isoformat(),
+        tariff=t["title"],
+        autopay=1,
+    )
+
+    await update.message.reply_text(
+        "🌕 Оплата прошла. Путь открыт.\n\n"
+        f"✨ Тариф: {t['title']}\n"
+        f"📅 Подписка активна до: {new_until.strftime('%d.%m.%Y')}\n"
+        "🔄 Автопродление: включено\n\n"
+        "Теперь твои сны не имеют границ.\n"
+        "Отменить автопродление можно в любой момент в личном кабинете —\n"
+        "доступ сохранится до конца срока. 🌙",
+        reply_markup=main_menu_keyboard(),
+    
+
+# ============================================================
+# 🌙 ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ
+# ============================================================
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
 
     if text == "🌑 О ONIRA":
         await update.message.reply_text(ABOUT_TEXT, reply_markup=about_keyboard())
