@@ -9,12 +9,12 @@ import datetime
 import ephem
 import google.generativeai as genai
  
- from telegram import (
+from telegram import (
      Update, ReplyKeyboardMarkup,
      InlineKeyboardButton, InlineKeyboardMarkup,
      LabeledPrice
  )
- from telegram.ext import (
+from telegram.ext import (
      Application, CommandHandler, MessageHandler,
      CallbackQueryHandler, PreCheckoutQueryHandler,
      filters, ContextTypes
