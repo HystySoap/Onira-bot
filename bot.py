@@ -1295,7 +1295,7 @@ def main():
         .build()
     )
 
-        register_handlers(application)
+    register_handlers(application)
 
     # Python 3.14 больше не создаёт event loop автоматически.
     asyncio.set_event_loop(
