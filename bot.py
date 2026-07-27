@@ -1,13 +1,13 @@
- from flask import Flask
- from threading import Thread
- import asyncio
- import os
- import logging
- import sqlite3
- import datetime
+from flask import Flask
+from threading import Thread
+import asyncio
+import os
+import logging
+import sqlite3
+import datetime
  
- import ephem
- import google.generativeai as genai
+import ephem
+import google.generativeai as genai
  
  from telegram import (
      Update, ReplyKeyboardMarkup,
