@@ -1,6 +1,6 @@
  from flask import Flask
  from threading import Thread
-+import asyncio
+ import asyncio
  import os
  import logging
  import sqlite3
@@ -28,12 +28,11 @@
  TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
  GEMINI_KEY = os.environ["GEMINI_KEY"]
  genai.configure(api_key=GEMINI_KEY)
-+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
  
--PROVIDER_TOKEN = "390540012:LIVE:98540"   # <<< ПРОВАЙДЕР-ТОКЕН ЮKASSA
-+# Оплата — дополнительная функция. Отсутствие платёжного токена не должно
-+# останавливать весь бот (например, сразу после обновления старого деплоя).
-+PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN")
+ # Оплата — дополнительная функция. Отсутствие платёжного токена не должно
+ # останавливать весь бот (например, сразу после обновления старого деплоя).
+ PROVIDER_TOKEN = os.getenv("PROVIDER_TOKEN")
  
  DB_PATH = "onira.db"
  FREE_DREAMS = 3                  # 🎁 бесплатных снов на старте
@@ -85,14 +84,12 @@
      is_new = not user_exists(user_id)
      get_user(user_id)  # создаём при первом визите
  
--    # 🎁 Реферальная ссылка: /start ref123456
-+    # Поддерживаем и старые ссылки ref_123456, и новые ref123456.
+     # Поддерживаем и старые ссылки ref_123456, и новые ref123456.
      if is_new and context.args:
          arg = context.args[0]
          if arg.startswith("ref"):
              try:
--                inviter_id = int(arg[3:])
-+                inviter_id = int(arg[3:].lstrip("_"))
+                 inviter_id = int(arg[3:].lstrip("_"))
                  if process_referral(user_id, inviter_id):
                      try:
                          await context.bot.send_message(
@@ -120,53 +117,31 @@
  # 💳 ОПЛАТА
  # ============================================================
  async def send_invoice(chat_id, tariff_key, context):
-+    if not PROVIDER_TOKEN:
-+        logging.error("PROVIDER_TOKEN не задан: отправка счёта недоступна")
-+        await context.bot.send_message(
-+            chat_id=chat_id,
-+            text=(
-+                "🌑 Сейчас оплата временно недоступна. "
-+                f"Пожалуйста, напиши в поддержку: {SUPPORT_CONTACT}"
-+            ),
-+        )
-+        return
-+
+     if not PROVIDER_TOKEN:
+         logging.error("PROVIDER_TOKEN не задан: отправка счёта недоступна")
+         await context.bot.send_message(
+             chat_id=chat_id,
+             text=(
+                 "🌑 Сейчас оплата временно недоступна. "
+                 f"Пожалуйста, напиши в поддержку: {SUPPORT_CONTACT}"
+             ),
+         )
+         return
+ 
      t = TARIFFS[tariff_key]
      await context.bot.send_invoice(
          chat_id=chat_id,
          title=t["title"],
          description=t["desc"],
--        payload=f"tariff:{tariff_key}",
-+        payload=f"sub:{tariff_key}",
+         payload=f"sub:{tariff_key}",
          provider_token=PROVIDER_TOKEN,
          currency="RUB",
          prices=[LabeledPrice(t["title"], t["price"] * 100)],
--        need_email=True,
--        send_email_to_provider=True,
--        provider_data={
--            "receipt": {
--                "items": [
--                    {
--                        "description": f"Подписка ONIRA: {t['title']}",
--                        "quantity": "1.00",
--                        "amount": {
--                            "value": f"{t['price']}.00",
--                            "currency": "RUB",
--                        },
--                        "vat_code": 1,
--                        "payment_mode": "full_payment",
--                        "payment_subject": "service",
--                    }
--                ]
--            }
--        },
-     )
- 
+
  
  async def precheckout(update: Update, context: ContextTypes.DEFAULT_TYPE):
      query = update.pre_checkout_query
--    if query.invoice_payload.startswith("tariff:"):
-+    if query.invoice_payload.startswith(("sub:", "tariff:")):
+     if query.invoice_payload.startswith(("sub:", "tariff:")):
          await query.answer(ok=True)
      else:
          await query.answer(ok=False, error_message="Что-то пошло не так. Попробуй ещё раз 🌑")
@@ -176,13 +151,12 @@
      user_id = update.effective_user.id
      payload = update.message.successful_payment.invoice_payload
      tariff_key = payload.split(":", 1)[1]
--    t = TARIFFS[tariff_key]
-+    t = TARIFFS.get(tariff_key)
-+    if t is None:
-+        await update.message.reply_text(
-+            "🌑 Оплата прошла, но тариф не распознан. Напиши, пожалуйста, в поддержку."
-+        )
-+        return
+     t = TARIFFS.get(tariff_key)
+     if t is None:
+         await update.message.reply_text(
+             "🌑 Оплата прошла, но тариф не распознан. Напиши, пожалуйста, в поддержку."
+         )
+         return
  
      u = get_user(user_id)
      now = datetime.datetime.utcnow()
@@ -205,82 +179,80 @@
          "Теперь твои сны не имеют границ.\n"
          "Отменить автопродление можно в любой момент в личном кабинете —\n"
          "доступ сохранится до конца срока. 🌙",
-         reply_markup=main_menu_keyboard(),
--    )        
-+    )
-+
-+
-+# ============================================================
-+# 🌙 КНОПКИ И НАВИГАЦИЯ
-+# ============================================================
-+async def show_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-+    user_id = update.effective_user.id
-+    is_member = await is_group_member(user_id, context)
-+    await update.effective_message.reply_text(
-+        cabinet_text(user_id, is_member),
-+        reply_markup=cabinet_keyboard(user_id),
-+    )
-+
-+
-+async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
-+    bot_username = (await context.bot.get_me()).username
-+    await update.effective_message.reply_text(
-+        referral_text(update.effective_user.id, bot_username),
-+    )
-+
-+
-+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-+    """Обрабатывает все inline-кнопки бота."""
-+    query = update.callback_query
-+    await query.answer()
-+    data = query.data or ""
-+    user_id = update.effective_user.id
-+
-+    if data.startswith("buy:"):
-+        tariff_key = data.split(":", 1)[1]
-+        if tariff_key not in TARIFFS:
-+            await query.message.reply_text("🌑 Этот путь пока недоступен.")
-+            return
-+        await send_invoice(query.message.chat_id, tariff_key, context)
-+    elif data == "open_tariffs":
-+        await query.message.reply_text(tariffs_text(), reply_markup=tariffs_keyboard())
-+    elif data == "tell_dream":
-+        await query.message.reply_text(
-+            "🌙 Я слушаю. Расскажи свой сон так, как помнишь его.",
-+            reply_markup=main_menu_keyboard(),
-+        )
-+    elif data == "back_menu":
-+        await query.message.reply_text(
-+            "🌙 Ты в главном меню. Выбери путь:",
-+            reply_markup=main_menu_keyboard(),
-+        )
-+    elif data == "cancel_sub":
-+        update_user(user_id, autopay=0)
-+        await query.message.reply_text(
-+            "🌙 Автопродление отключено. Доступ сохранится до конца оплаченного срока.",
-+            reply_markup=main_menu_keyboard(),
-+        )
-+    elif data == "resume_sub":
-+        update_user(user_id, autopay=1)
-+        await query.message.reply_text(
-+            "🔄 Автопродление снова включено.",
-+            reply_markup=main_menu_keyboard(),
-+        )
-+    else:
-+        logging.warning("Неизвестная callback-команда: %s", data)
-+        await query.message.reply_text("🌑 Не узнала эту кнопку. Открой меню ещё раз.")
+         reply_markup=main_menu_keyboard(),        
+     )
+ 
+ 
+ # ============================================================
+ # 🌙 КНОПКИ И НАВИГАЦИЯ
+ # ============================================================
+ async def show_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     user_id = update.effective_user.id
+     is_member = await is_group_member(user_id, context)
+     await update.effective_message.reply_text(
+         cabinet_text(user_id, is_member),
+         reply_markup=cabinet_keyboard(user_id),
+     )
+ 
+ 
+ async def show_referral(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     bot_username = (await context.bot.get_me()).username
+     await update.effective_message.reply_text(
+         referral_text(update.effective_user.id, bot_username),
+     )
+ 
+ 
+ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     """Обрабатывает все inline-кнопки бота."""
+     query = update.callback_query
+     await query.answer()
+     data = query.data or ""
+     user_id = update.effective_user.id
+ 
+     if data.startswith("buy:"):
+         tariff_key = data.split(":", 1)[1]
+         if tariff_key not in TARIFFS:
+             await query.message.reply_text("🌑 Этот путь пока недоступен.")
+             return
+         await send_invoice(query.message.chat_id, tariff_key, context)
+     elif data == "open_tariffs":
+         await query.message.reply_text(tariffs_text(), reply_markup=tariffs_keyboard())
+     elif data == "tell_dream":
+         await query.message.reply_text(
+             "🌙 Я слушаю. Расскажи свой сон так, как помнишь его.",
+             reply_markup=main_menu_keyboard(),
+         )
+     elif data == "back_menu":
+         await query.message.reply_text(
+             "🌙 Ты в главном меню. Выбери путь:",
+             reply_markup=main_menu_keyboard(),
+         )
+     elif data == "cancel_sub":
+         update_user(user_id, autopay=0)
+         await query.message.reply_text(
+             "🌙 Автопродление отключено. Доступ сохранится до конца оплаченного срока.",
+             reply_markup=main_menu_keyboard(),
+         )
+     elif data == "resume_sub":
+         update_user(user_id, autopay=1)
+         await query.message.reply_text(
+             "🔄 Автопродление снова включено.",
+             reply_markup=main_menu_keyboard(),
+         )
+     else:
+         logging.warning("Неизвестная callback-команда: %s", data)
+         await query.message.reply_text("🌑 Не узнала эту кнопку. Открой меню ещё раз.")
  
  # ============================================================
  # 🌙 ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ
  # ============================================================
  async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-+    if update.effective_chat.type != "private":
-+        return
-+
+     if update.effective_chat.type != "private":
+         return
+ 
      user_id = update.effective_user.id
--    text = update.message.text
-+    text = update.message.text.strip()
-+    get_user(user_id)
+     text = update.message.text.strip()
+     get_user(user_id)
  
      if text == "🌑 О ONIRA":
          await update.message.reply_text(ABOUT_TEXT, reply_markup=about_keyboard())
@@ -294,20 +266,20 @@
          await update.message.reply_text(HELP_TEXT, reply_markup=main_menu_keyboard())
          return
  
-+    if text == "🌙 Рассказать сон":
-+        await update.message.reply_text(
-+            "🌙 Я слушаю. Расскажи свой сон так, как помнишь его."
-+        )
-+        return
-+
-+    if text == "👤 Личный кабинет":
-+        await show_cabinet(update, context)
-+        return
-+
-+    if text == "🎁 Пригласить друга":
-+        await show_referral(update, context)
-+        return
-+
+     if text == "🌙 Рассказать сон":
+         await update.message.reply_text(
+             "🌙 Я слушаю. Расскажи свой сон так, как помнишь его."
+         )
+         return
+ 
+     if text == "👤 Личный кабинет":
+         await show_cabinet(update, context)
+         return
+ 
+     if text == "🎁 Пригласить друга":
+         await show_referral(update, context)
+         return
+ 
      # ---------- ОБЫЧНОЕ СООБЩЕНИЕ = РАЗГОВОР С ONIRA ----------
      allowed, reason = await check_access(user_id, context)
      if not allowed:
@@ -323,17 +295,15 @@
      try:
          if user_id not in chats:
              model = genai.GenerativeModel(
--                model_name="gemini-2.0-flash",
-+                model_name=GEMINI_MODEL,
+                 model_name=GEMINI_MODEL,
                  system_instruction=SYSTEM_PROMPT,
              )
              chats[user_id] = model.start_chat(history=[])
  
--        response = chats[user_id].send_message(text + moon_context())
-+        # Синхронный SDK Gemini не должен блокировать обработку других апдейтов.
-+        response = await asyncio.to_thread(
-+            chats[user_id].send_message, text + moon_context()
-+        )
+         # Синхронный SDK Gemini не должен блокировать обработку других апдейтов.
+         response = await asyncio.to_thread(
+             chats[user_id].send_message, text + moon_context()
+         )
          answer = response.text
  
          # 🎁 Списываем бесплатный сон (только у тех, кто без подписки и не в группе)
@@ -361,10 +331,8 @@
          for i in range(0, len(answer), 4000):
              await update.message.reply_text(answer[i:i + 4000])
  
--    except Exception as e:
--        logging.error(f"Gemini error: {e}")
-+    except Exception:
-+        logging.exception("Gemini error")
+     except Exception:
+         logging.exception("Gemini error")
          chats.pop(user_id, None)
          await update.message.reply_text(
              "🌑 Туман сгустился, и я на миг потеряла нить...\n"
@@ -372,11 +340,11 @@
          )
  
  
-+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-+    """Точка входа для обычных текстовых сообщений Telegram."""
-+    await handle_message(update, context)
-+
-+
+ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+     """Точка входа для обычных текстовых сообщений Telegram."""
+     await handle_message(update, context)
+ 
+ 
  # ============================================================
  # 🌐 FLASK (чтобы хостинг не засыпал)
  # ============================================================
@@ -392,18 +360,8 @@
      app.run(host="0.0.0.0", port=8080)
  
  
--# ============================================================
--# 🌕 ЗАПУСК
--# ============================================================
--def main():
--    init_db()
--
--    Thread(target=run_flask, daemon=True).start()
--
--    application = Application.builder().token(TELEGRAM_TOKEN).build()
--
-+def register_handlers(application):
-+    """Register all Telegram handlers in a separately testable step."""
+ def register_handlers(application):
+     """Register all Telegram handlers in a separately testable step."""
      application.add_handler(CommandHandler("start", start))
      application.add_handler(CommandHandler("menu", menu))
      application.add_handler(CallbackQueryHandler(handle_callback))
@@ -415,18 +373,18 @@
          MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
      )
  
-+
-+# ============================================================
-+# 🌕 ЗАПУСК
-+# ============================================================
-+def main():
-+    init_db()
-+
-+    Thread(target=run_flask, daemon=True).start()
-+
-+    application = Application.builder().token(TELEGRAM_TOKEN).build()
-+    register_handlers(application)
-+
+ 
+ # ============================================================
+ # 🌕 ЗАПУСК
+ # ============================================================
+ def main():
+     init_db()
+ 
+     Thread(target=run_flask, daemon=True).start()
+ 
+     application = Application.builder().token(TELEGRAM_TOKEN).build()
+     register_handlers(application)
+ 
      logging.info("🌙 ONIRA пробудилась...")
      application.run_polling()
  
